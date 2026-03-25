@@ -1,0 +1,228 @@
+---
+title: "Analyzing E-commerce Consumer Behaviour"
+author: "Phil (Fei Han) & Doniyorbek Komi"
+format: pdf
+editor: visual
+date: "2026-03-19"
+
+---
+```{r}
+# Load libraries
+library(tidyverse)
+library(corrplot)
+library(viridis)
+library(scales)
+library(car)
+library(pROC)
+
+# --- Clean and Preprocess Data ---
+df_clean <- read.csv("online_shoppers_intention.csv") %>%
+  mutate(
+    # Convert Revenue to Factor
+    Revenue = factor(Revenue, levels = c(FALSE, TRUE), labels = c("No Purchase", "Purchase")),
+    
+    # Convert Month (Define Order: Feb is the Reference Level)
+    Month = factor(Month, levels = c("Feb", "Mar", "May", "June", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")),
+    
+    # Convert VisitorType and Weekend
+    VisitorType = as.factor(VisitorType),
+    Weekend = factor(Weekend, levels = c(FALSE, TRUE), labels = c("Weekday", "Weekend")),
+    
+    # Create Numeric Label for calculations
+    is_purchase = as.numeric(Revenue == "Purchase")
+  ) %>%
+  drop_na()
+
+# Define a consistent theme for the project
+project_theme <- theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    axis.title = element_text(size = 12),
+    legend.position = "bottom"
+  )
+```
+
+Exploratory Data Analysis (EDA)
+distribution of Page Values
+We begin by examining our primary predictors. Our initial hypothesis suggests that PageValues significantly influences the likelihood of a transaction.
+```{r}
+#| label: data-summary
+#| message: false
+
+# Check for missing values
+cat("Missing values in dataset:", sum(is.na(df_clean)), "\n")
+
+# View the distribution of our target variable: Revenue
+table(df_clean$Revenue)
+```
+```{r}
+#| label: fig-pagevalues
+#| fig-cap: "Comparison of Page Values for Purchase vs. No Purchase"
+
+ggplot(df_clean, aes(x = Revenue, y = PageValues, fill = Revenue)) +
+  geom_boxplot(alpha = 0.7) +
+  scale_fill_manual(values = c("#FF6666", "#00CC66")) +
+  labs(
+    title = "Does Page Value Predict Purchase?",
+    subtitle = "Higher PageValues are strongly associated with successful transactions",
+    x = "Transaction Outcome (Revenue)",
+    y = "Page Value Score"
+  ) +
+  project_theme
+```
+
+```{r}
+#| label: fig-monthly-trend
+#| fig-cap: "Monthly Conversion Rates Throughout the Year"
+
+df_clean %>% 
+  group_by(Month) %>% 
+  summarise(Conversion_Rate = mean(Revenue == "Purchase")) %>% 
+  ggplot(aes(x = Month, y = Conversion_Rate, group = 1)) +
+  geom_line(color = "steelblue", size = 1) +
+  geom_point(size = 3, color = "darkblue") +
+  scale_y_continuous(labels = percent) +
+  labs(
+    title = "E-commerce Seasonality: Monthly Conversion Rates",
+    x = "Month of the Year",
+    y = "Conversion Rate (%)"
+  ) +
+  project_theme
+```
+```{r}
+#| label: fig-visitor-type
+#| fig-cap: "Purchase Proportion by Visitor Type"
+
+ggplot(df_clean, aes(x = VisitorType, fill = Revenue)) +
+  geom_bar(position = "fill") +
+  scale_y_continuous(labels = percent) +
+  labs(
+    title = "Visitor Behaviour: New vs. Returning",
+    x = "Visitor Category",
+    y = "Percentage",
+    fill = "Purchased?"
+  ) +
+  project_theme
+```
+```{r}
+#| label: fig-correlation
+#| fig-height: 7
+#| fig-width: 7
+
+# Select numeric columns and calculate correlation
+numeric_df <- df_clean %>% select(where(is.numeric))
+cor_matrix <- cor(numeric_df)
+
+corrplot(cor_matrix, method = "circle", type = "upper", 
+         tl.col = "black", tl.srt = 45, 
+         title = "Correlation Heatmap of Website Metrics",
+         mar = c(0,0,1,0))
+```
+
+```{r}
+#| label: data-cleaning
+#| message: false
+
+df <- read.csv("online_shoppers_intention.csv")
+
+df_clean <- df %>%
+  mutate(
+    Revenue = factor(Revenue, 
+                     levels = c(FALSE, TRUE), 
+                     labels = c("No Purchase", "Purchase")),
+    
+    Month = factor(Month, 
+                   levels = c("Feb", "Mar", "May", "June", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")),
+    
+    VisitorType = as.factor(VisitorType),
+    Weekend = factor(Weekend, 
+                     levels = c(FALSE, TRUE), 
+                     labels = c("Weekday", "Weekend")),
+    
+    is_purchase = as.numeric(Revenue == "Purchase")
+  ) %>%
+  drop_na()
+
+summary(df_clean)
+```
+
+
+```{r}
+# Create binary numeric response variable
+df_clean$Revenue_num <- as.numeric(df_clean$Revenue == "Purchase")
+
+# --- Step 1: Variable Selection (unweighted) ---
+predictors <- setdiff(names(df_clean), c("Revenue", "Revenue_num", "case_weight", "is_purchase"))
+clean_formula <- as.formula(paste("Revenue_num ~", paste(predictors, collapse = " + ")))
+
+step_model_base <- glm(clean_formula, data = df_clean, family = binomial)
+aic_var_selection <- step(step_model_base, direction = "both", trace = 0)
+
+# --- Step 2: Final Model ---
+final_formula <- formula(aic_var_selection)
+aic_model <- glm(final_formula, data = df_clean, family = binomial)
+summary(aic_model)
+```
+```{r}
+# --- Step 1: Manually define predictors (exclude auxiliary columns) ---
+# Ensure the model only sees raw features, not weight or helper columns
+predictors <- setdiff(names(df_clean), c("Revenue", "case_weight", "is_purchase"))
+clean_formula <- as.formula(paste("Revenue ~", paste(predictors, collapse = " + ")))
+
+# --- Step 2: Fit base model (for variable selection only) ---
+# No weights at this stage — keeps AIC logic clean and avoids errors in step()
+step_model_base <- glm(clean_formula, data = df_clean, family = binomial)
+
+# --- Step 3: Stepwise variable selection ---
+# trace = 0 suppresses the selection log, keeping the rendered document clean
+aic_var_selection <- step(step_model_base, direction = "both", trace = 0)
+
+# --- Step 4: Fit final weighted model ---
+# Extract the selected formula from aic_var_selection
+final_formula <- formula(aic_var_selection)
+
+# Key fix: use df_clean$case_weight to explicitly reference the column
+aic_model <- glm(final_formula, 
+                 data    = df_clean, 
+                 family  = quasibinomial, 
+                 weights = df_clean$case_weight)
+
+# View results
+summary(aic_model)
+```
+
+
+```{r}
+# 1. Predicted probabilities
+predicted_probs <- predict(aic_model, type = "response")
+
+# 2. ROC and AUC
+roc_obj <- roc(df_clean$Revenue_num, predicted_probs)
+auc_val <- auc(roc_obj)
+
+# 3. Print metrics
+cat("AIC:", AIC(aic_model), "\n")
+cat("AUC:", round(auc_val, 4), "\n")
+
+# 4. Plot
+plot(roc_obj, col = "#2c3e50", lwd = 3,
+     main = paste("ROC Curve (Optimized Model)\nAUC =", round(auc_val, 3)))
+abline(a = 0, b = 1, lty = 2, col = "red")
+```
+major variable
+
+user intention data (PageValues, ExitRates)
+
+time seryie data (Month)
+
+user behavior data (ProductRelated_Duration, VisitorType)
+
+"Excluded Variables":
+
+Technical: Browser, OS, Region (Minimal impact on intent).
+
+Redundant: SpecialDay, Weekend (Captured by Month/Seasonality).
+
+Operational: Administrative, Informational (Less predictive than product-related engagement).
+
+
